@@ -106,6 +106,9 @@ pub mod pallet {
 		/// The maximum number of deposits a public proposal may have at any time.
 		#[pallet::constant]
 		type MaxDeposits: Get<u32>;
+
+        #[pallet::constant]
+		type MinimumDeposit: Get<BalanceOf<Self>>;
     }
 
     /// The number of (public) proposals that have been made so far.
@@ -154,10 +157,10 @@ pub mod pallet {
 
 	 /// TWOX-NOTE: SAFE as indexes are not under an attacker’s control.
 	#[pallet::storage]
-	pub type ReferendumProposalType<T: Config> = StorageMap<
+	pub type ProposalTypeStore<T: Config> = StorageMap<
 		_,
 		Twox64Concat,
-		ReferendumIndex,
+		PropIndex,
 		ProposalType<T::AccountId, BalanceOf<T>>,
 	>;
 
@@ -178,13 +181,8 @@ pub mod pallet {
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
-        /// A user has successfully set a new value.
-        SomethingStored {
-            /// The new value set.
-            something: u32,
-            /// The account who set the new value.
-            who: T::AccountId,
-        },
+        	/// A motion has been proposed by a public account.
+		Proposed { proposal_index: PropIndex, deposit: BalanceOf<T> },
     }
 
     /// Errors that can be returned by this pallet.
@@ -197,10 +195,12 @@ pub mod pallet {
     /// information.
     #[pallet::error]
     pub enum Error<T> {
-        /// The value retrieved was `None` as no value was previously set.
-        NoneValue,
-        /// There was an attempt to increment the value in storage over `u32::MAX`.
-        StorageOverflow,
+        /// Value too low
+		ValueLow,
+        /// Maximum number of items reached.
+		TooMany,
+        /// Proposal still blacklisted
+        ProposalBlacklisted,
     }
 
     /// The pallet's dispatchable functions ([`Call`]s).
@@ -217,44 +217,113 @@ pub mod pallet {
     /// The [`weight`] macro is used to assign a weight to each call.
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// An example dispatchable that takes a single u32 value as a parameter, writes the value
-        /// to storage and emits an event.
-        ///
-        /// It checks that the _origin_ for this call is _Signed_ and returns a dispatch
-        /// error if it isn't. Learn more about origins here: <https://docs.substrate.io/build/origins/>
-        #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::do_something())]
-        pub fn do_something(origin: OriginFor<T>, something: u32) -> DispatchResult {
-            // Check that the extrinsic was signed and get the signer.
-            let who = ensure_signed(origin)?;
+        /// Propose a sensitive action to be taken.
+		///
+		/// The dispatch origin of this call must be _Signed_ and the sender must
+		/// have funds to cover the deposit.
+		///
+		/// - `proposal_hash`: The hash of the proposal preimage.
+		/// - `value`: The amount of deposit (must be at least `MinimumDeposit`).
+		///
+		/// Emits `Proposed`.
+		#[pallet::call_index(0)]
+		#[pallet::weight(0)]
+		pub fn propose(
+			origin: OriginFor<T>,
+            proposal_type: ProposalType<T::AccountId, BalanceOf<T>>, 
+			proposal: BoundedCallOf<T>,
+			#[pallet::compact] value: BalanceOf<T>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			ensure!(value >= T::MinimumDeposit::get(), Error::<T>::ValueLow);
 
-            // Emit an event.
-            Self::deposit_event(Event::SomethingStored { something, who });
+			let index = PublicPropCount::<T>::get();
+			let real_prop_count = PublicProps::<T>::decode_len().unwrap_or(0) as u32;
+			let max_proposals = T::MaxProposals::get();
+			ensure!(real_prop_count < max_proposals, Error::<T>::TooMany);
+			let proposal_hash = proposal.hash();
 
-            // Return a successful `DispatchResult`
-            Ok(())
-        }
+			// if let Some((until, _)) = Blacklist::<T>::get(proposal_hash) {
+			// 	ensure!(
+			// 		frame_system::Pallet::<T>::block_number() >= until,
+			// 		Error::<T>::ProposalBlacklisted,
+			// 	);
+			// }
 
-        /// An example dispatchable that may throw a custom error.
-        ///
-        /// It checks that the caller is a signed origin and reads the current value from the
-        /// `Something` storage item. If a current value exists, it is incremented by 1 and then
-        /// written back to storage.
-        ///
-        /// ## Errors
-        ///
-        /// The function will return an error under the following conditions:
-        ///
-        /// - If no value has been set ([`Error::NoneValue`])
-        /// - If incrementing the value in storage causes an arithmetic overflow
-        ///   ([`Error::StorageOverflow`])
-        #[pallet::call_index(1)]
-        #[pallet::weight(T::WeightInfo::cause_error())]
-        pub fn cause_error(origin: OriginFor<T>) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+			T::Currency::reserve(&who, value)?;
 
-           
+			let depositors = BoundedVec::<_, T::MaxDeposits>::truncate_from(vec![who.clone()]);
+			DepositOf::<T>::insert(index, (depositors, value));
+            ProposalTypeStore::<T>::insert(index, proposal_type);
+			PublicPropCount::<T>::put(index + 1);
+
+			PublicProps::<T>::try_append((index, proposal, who))
+				.map_err(|_| Error::<T>::TooMany)?;
+
+			Self::deposit_event(Event::<T>::Proposed { proposal_index: index, deposit: value });
 			Ok(())
-        }
+		}
+
+
+        #[pallet::call_index(1)]
+		#[pallet::weight(0)]
+		pub fn vote(
+			origin: OriginFor<T>,
+			#[pallet::compact] ref_index: PropIndex,
+			vote: AccountVote<BalanceOf<T>>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+			Self::try_vote(&who, ref_index, vote)
+		}
     }
+}
+
+impl<T: Config> Pallet<T> {
+    fn try_vote(
+		who: &T::AccountId,
+		ref_index: PropIndex,
+		vote: AccountVote<BalanceOf<T>>,
+	) -> DispatchResult {
+		// let mut status = Self::referendum_status(ref_index)?;
+		// ensure!(vote.balance() <= T::Currency::free_balance(who), Error::<T>::InsufficientFunds);
+		// VotingOf::<T>::try_mutate(who, |voting| -> DispatchResult {
+		// 	if let Voting::Direct { ref mut votes, delegations, .. } = voting {
+		// 		match votes.binary_search_by_key(&ref_index, |i| i.0) {
+		// 			Ok(i) => {
+		// 				// Shouldn't be possible to fail, but we handle it gracefully.
+		// 				status.tally.remove(votes[i].1).ok_or(ArithmeticError::Underflow)?;
+		// 				if let Some(approve) = votes[i].1.as_standard() {
+		// 					status.tally.reduce(approve, *delegations);
+		// 				}
+		// 				votes[i].1 = vote;
+		// 			},
+		// 			Err(i) => {
+		// 				votes
+		// 					.try_insert(i, (ref_index, vote))
+		// 					.map_err(|_| Error::<T>::MaxVotesReached)?;
+		// 			},
+		// 		}
+		// 		Self::deposit_event(Event::<T>::Voted { voter: who.clone(), ref_index, vote });
+		// 		// Shouldn't be possible to fail, but we handle it gracefully.
+		// 		status.tally.add(vote).ok_or(ArithmeticError::Overflow)?;
+		// 		if let Some(approve) = vote.as_standard() {
+		// 			status.tally.increase(approve, *delegations);
+		// 		}
+		// 		Ok(())
+		// 	} else {
+		// 		Err(Error::<T>::AlreadyDelegating.into())
+		// 	}
+		// })?;
+		// // Extend the lock to `balance` (rather than setting it) since we don't know what other
+		// // votes are in place.
+		// T::Currency::extend_lock(
+		// 	DEMOCRACY_ID,
+		// 	who,
+		// 	vote.balance(),
+		// 	WithdrawReasons::except(WithdrawReasons::RESERVE),
+		// );
+		// ReferendumInfoOf::<T>::insert(ref_index, ReferendumInfo::Ongoing(status));
+		Ok(())
+	}
+
 }
