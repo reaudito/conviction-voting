@@ -233,3 +233,16 @@ pub enum MetadataOwner {
 	/// Referendum of the index.
 	Referendum(ReferendumIndex),
 }
+
+
+
+#[derive(Encode, Decode, Clone, PartialEq, Eq, RuntimeDebug, TypeInfo)]
+pub enum ProposalType<AccountId, Balance> {
+    Grant {
+        recipient: AccountId,
+        amount: Balance,
+    },
+    ValidatorApplication {
+        validator: AccountId,
+    },
+}
