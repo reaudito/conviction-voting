@@ -119,7 +119,7 @@ pub mod pallet {
     #[pallet::storage]
     pub type PublicProps<T: Config> = StorageValue<
         _,
-        BoundedVec<(PropIndex, BoundedCallOf<T>, T::AccountId), T::MaxProposals>,
+        BoundedVec<(PropIndex, Vec<u8>, T::AccountId), T::MaxProposals>,
         ValueQuery,
     >;
 
@@ -134,23 +134,11 @@ pub mod pallet {
         (BoundedVec<T::AccountId, T::MaxDeposits>, BalanceOf<T>),
     >;
 
-    /// The next free referendum index, aka the number of referenda started so far.
-    #[pallet::storage]
-    pub type ReferendumCount<T> = StorageValue<_, ReferendumIndex, ValueQuery>;
-
-    /// The lowest referendum index representing an unbaked referendum. Equal to
-    /// `ReferendumCount` if there isn't a unbaked referendum.
-    #[pallet::storage]
-    pub type LowestUnbaked<T> = StorageValue<_, ReferendumIndex, ValueQuery>;
-
-    /// Information concerning any given referendum.
-    ///
-    /// TWOX-NOTE: SAFE as indexes are not under an attacker’s control.
     #[pallet::storage]
     pub type ReferendumInfoOf<T: Config> = StorageMap<
         _,
         Twox64Concat,
-        ReferendumIndex,
+        PropIndex,
         ReferendumInfo<BlockNumberFor<T>, BoundedCallOf<T>, BalanceOf<T>>,
     >;
 
@@ -183,6 +171,9 @@ pub mod pallet {
     pub enum Event<T: Config> {
         	/// A motion has been proposed by a public account.
 		Proposed { proposal_index: PropIndex, deposit: BalanceOf<T> },
+
+        /// An account has voted in a referendum
+		Voted { voter: T::AccountId, ref_index: ReferendumIndex, vote: AccountVote<BalanceOf<T>> },
     }
 
     /// Errors that can be returned by this pallet.
@@ -201,6 +192,14 @@ pub mod pallet {
 		TooMany,
         /// Proposal still blacklisted
         ProposalBlacklisted,
+
+        InsufficientFunds,
+
+        MaxVotesReached,
+
+        AlreadyDelegating,
+
+        ReferendumInvalid,
     }
 
     /// The pallet's dispatchable functions ([`Call`]s).
@@ -231,7 +230,7 @@ pub mod pallet {
 		pub fn propose(
 			origin: OriginFor<T>,
             proposal_type: ProposalType<T::AccountId, BalanceOf<T>>, 
-			proposal: BoundedCallOf<T>,
+			proposal: Vec<u8>,
 			#[pallet::compact] value: BalanceOf<T>,
 		) -> DispatchResult {
 			let who = ensure_signed(origin)?;
@@ -241,7 +240,6 @@ pub mod pallet {
 			let real_prop_count = PublicProps::<T>::decode_len().unwrap_or(0) as u32;
 			let max_proposals = T::MaxProposals::get();
 			ensure!(real_prop_count < max_proposals, Error::<T>::TooMany);
-			let proposal_hash = proposal.hash();
 
 			// if let Some((until, _)) = Blacklist::<T>::get(proposal_hash) {
 			// 	ensure!(
@@ -284,46 +282,65 @@ impl<T: Config> Pallet<T> {
 		ref_index: PropIndex,
 		vote: AccountVote<BalanceOf<T>>,
 	) -> DispatchResult {
-		// let mut status = Self::referendum_status(ref_index)?;
-		// ensure!(vote.balance() <= T::Currency::free_balance(who), Error::<T>::InsufficientFunds);
-		// VotingOf::<T>::try_mutate(who, |voting| -> DispatchResult {
-		// 	if let Voting::Direct { ref mut votes, delegations, .. } = voting {
-		// 		match votes.binary_search_by_key(&ref_index, |i| i.0) {
-		// 			Ok(i) => {
-		// 				// Shouldn't be possible to fail, but we handle it gracefully.
-		// 				status.tally.remove(votes[i].1).ok_or(ArithmeticError::Underflow)?;
-		// 				if let Some(approve) = votes[i].1.as_standard() {
-		// 					status.tally.reduce(approve, *delegations);
-		// 				}
-		// 				votes[i].1 = vote;
-		// 			},
-		// 			Err(i) => {
-		// 				votes
-		// 					.try_insert(i, (ref_index, vote))
-		// 					.map_err(|_| Error::<T>::MaxVotesReached)?;
-		// 			},
-		// 		}
-		// 		Self::deposit_event(Event::<T>::Voted { voter: who.clone(), ref_index, vote });
-		// 		// Shouldn't be possible to fail, but we handle it gracefully.
-		// 		status.tally.add(vote).ok_or(ArithmeticError::Overflow)?;
-		// 		if let Some(approve) = vote.as_standard() {
-		// 			status.tally.increase(approve, *delegations);
-		// 		}
-		// 		Ok(())
-		// 	} else {
-		// 		Err(Error::<T>::AlreadyDelegating.into())
-		// 	}
-		// })?;
-		// // Extend the lock to `balance` (rather than setting it) since we don't know what other
-		// // votes are in place.
-		// T::Currency::extend_lock(
-		// 	DEMOCRACY_ID,
-		// 	who,
-		// 	vote.balance(),
-		// 	WithdrawReasons::except(WithdrawReasons::RESERVE),
-		// );
-		// ReferendumInfoOf::<T>::insert(ref_index, ReferendumInfo::Ongoing(status));
+		let mut status = Self::referendum_status(ref_index)?;
+		ensure!(vote.balance() <= T::Currency::free_balance(who), Error::<T>::InsufficientFunds);
+		VotingOf::<T>::try_mutate(who, |voting| -> DispatchResult {
+			if let Voting::Direct { ref mut votes, delegations, .. } = voting {
+				match votes.binary_search_by_key(&ref_index, |i| i.0) {
+					Ok(i) => {
+						// Shouldn't be possible to fail, but we handle it gracefully.
+						status.tally.remove(votes[i].1).ok_or(ArithmeticError::Underflow)?;
+						if let Some(approve) = votes[i].1.as_standard() {
+							status.tally.reduce(approve, *delegations);
+						}
+						votes[i].1 = vote;
+					},
+					Err(i) => {
+						votes
+							.try_insert(i, (ref_index, vote))
+							.map_err(|_| Error::<T>::MaxVotesReached)?;
+					},
+				}
+				Self::deposit_event(Event::<T>::Voted { voter: who.clone(), ref_index, vote });
+				// Shouldn't be possible to fail, but we handle it gracefully.
+				status.tally.add(vote).ok_or(ArithmeticError::Overflow)?;
+				if let Some(approve) = vote.as_standard() {
+					status.tally.increase(approve, *delegations);
+				}
+				Ok(())
+			} else {
+				Err(Error::<T>::AlreadyDelegating.into())
+			}
+		})?;
+		// Extend the lock to `balance` (rather than setting it) since we don't know what other
+		// votes are in place.
+		T::Currency::extend_lock(
+			CONVICTION_VOTING,
+			who,
+			vote.balance(),
+			WithdrawReasons::except(WithdrawReasons::RESERVE),
+		);
+		ReferendumInfoOf::<T>::insert(ref_index, ReferendumInfo::Ongoing(status));
 		Ok(())
 	}
+
+    fn referendum_status(
+		ref_index: ReferendumIndex,
+	) -> Result<ReferendumStatus<BlockNumberFor<T>, BoundedCallOf<T>, BalanceOf<T>>, DispatchError>
+	{
+		let info = ReferendumInfoOf::<T>::get(ref_index).ok_or(Error::<T>::ReferendumInvalid)?;
+		Self::ensure_ongoing(info)
+	}
+
+    fn ensure_ongoing(
+		r: ReferendumInfo<BlockNumberFor<T>, BoundedCallOf<T>, BalanceOf<T>>,
+	) -> Result<ReferendumStatus<BlockNumberFor<T>, BoundedCallOf<T>, BalanceOf<T>>, DispatchError>
+	{
+		match r {
+			ReferendumInfo::Ongoing(s) => Ok(s),
+			_ => Err(Error::<T>::ReferendumInvalid.into()),
+		}
+	}
+
 
 }

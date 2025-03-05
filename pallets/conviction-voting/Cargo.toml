@@ -28,6 +28,7 @@ serde = { features = ["derive"], optional = true, workspace = true, default-feat
 
 
 [dev-dependencies]
+pallet-balances = { workspace = true, default-features = true }
 sp-core = { default-features = true, workspace = true }
 sp-io = { default-features = true, workspace = true }
 sp-runtime = { default-features = true, workspace = true }

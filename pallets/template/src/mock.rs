@@ -27,11 +27,21 @@ mod runtime {
 
 	#[runtime::pallet_index(1)]
 	pub type Template = pallet_template::Pallet<Test>;
+
+	#[runtime::pallet_index(2)]
+	pub type Balances = pallet_balances::Pallet<Test>;
 }
 
 #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
 impl frame_system::Config for Test {
 	type Block = Block;
+	type AccountData = pallet_balances::AccountData<u64>;
+
+}
+
+#[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
+impl pallet_balances::Config for Test {
+	type AccountStore = System;
 }
 
 impl pallet_template::Config for Test {
