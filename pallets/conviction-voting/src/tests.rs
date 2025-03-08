@@ -68,7 +68,7 @@ fn vote_with_sufficient_funds_works() {
             AccountVote::Standard {
                 vote: Vote {
                     aye: true,
-                    conviction: Conviction::Locked2x,
+                    conviction: Conviction::Locked4x,
                 },
                 balance: 10,
             },
@@ -77,5 +77,36 @@ fn vote_with_sufficient_funds_works() {
         let voting= ConvictionVoting::voting_of(&3);
         println!("{:?}", voting);
         // assert_eq!(voting, Voting::Direct { votes: BoundedVec([(0, AccountVote::Standard { vote: Vote { aye: true, conviction: Conviction::None }, balance: 10 })], 1000), delegations: Delegations { votes: 0, capital: 0 }, prior: PriorLock(0, 0) });
+        let referendum_info = ConvictionVoting::referendum_info_of(&0);
+        println!("{:?}", referendum_info);
+        
+
+        // For second voters Conviction::Locked2x
+        // Some(ReferendumInfo::Ongoing(ReferendumStatus { end: 1001, proposal: BoundedVec([1, 2, 3], 32), threshold: VoteThreshold::SuperMajorityApprove, delay: 100, tally: Tally { ayes: 21, nays: 0, turnout: 20 } }))
+
+        // With both voters Conviction:None
+        // Some(ReferendumInfo::Ongoing(ReferendumStatus { end: 1001, proposal: BoundedVec([1, 2, 3], 32), threshold: VoteThreshold::SuperMajorityApprove, delay: 100, tally: Tally { ayes: 2, nays: 0, turnout: 20 } }))
+        
+
+
+        assert_ok!(ConvictionVoting::vote(
+            RuntimeOrigin::signed(4),
+            0,
+            AccountVote::Standard {
+                vote: Vote {
+                    aye: false,
+                    conviction: Conviction::Locked4x,
+                },
+                balance: 10,
+            },
+        ));
+
+        let voting= ConvictionVoting::voting_of(&4);
+        println!("{:?}", voting);
+        // assert_eq!(voting, Voting::Direct { votes: BoundedVec([(0, AccountVote::Standard { vote: Vote { aye: true, conviction: Conviction::None }, balance: 10 })], 1000), delegations: Delegations { votes: 0, capital: 0 }, prior: PriorLock(0, 0) });
+        let referendum_info = ConvictionVoting::referendum_info_of(&0);
+        println!("{:?}", referendum_info);
+
+        // Some(ReferendumInfo::Ongoing(ReferendumStatus { end: 1001, proposal: BoundedVec([1, 2, 3], 32), threshold: VoteThreshold::SuperMajorityApprove, delay: 100, tally: Tally { ayes: 41, nays: 40, turnout: 30 } }))
     });
 }

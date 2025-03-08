@@ -137,6 +137,7 @@ pub mod pallet {
     >;
 
     #[pallet::storage]
+    #[pallet::getter(fn referendum_info_of)]
     pub type ReferendumInfoOf<T: Config> = StorageMap<
         _,
         Twox64Concat,
